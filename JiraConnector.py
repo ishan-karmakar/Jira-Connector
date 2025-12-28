@@ -1,12 +1,12 @@
 ### Imports
 
-from jira import JIRA, Project
+from jira import JIRA
 from jira.resources import Attachment
 import os
 from dotenv import load_dotenv
-import boto3
 import time
 import requests
+import json
 
 
 load_dotenv()
@@ -38,20 +38,6 @@ def getJiraIssues():
     return issues
 
 
-def handleS3withIssue(issues, Name):
-    s3 = boto3.resource("s3")
-    bucket = s3.Bucket("autocam-attachments")
-    attachments = issues.get_field("attachment")
-    if not attachments:
-        return
-    for attachment in attachments:
-        if attachment.filename.endswith(".step"):
-            Key = f"Valor-{Name}-{attachment.filename}"
-            if not any(obj.key == Key for obj in bucket.objects.all()):
-                bucket.put_object(Key=Key, Body=attachment.get())
-            break
-
-
 def handlePostgresPartCategories(Material, Thickness):
     response = session.get("http://localhost:3000/api/pc")
     part_categories = response.json()
@@ -66,20 +52,36 @@ def handlePostgresPartCategories(Material, Thickness):
     return category_id
 
 
-def handlePostgresParts(Name, Epic, Ticket, Quantity, category_id):
+def handlePostgresParts(Name, Epic, Ticket, Quantity, category_id, attachment):
     parts = session.get(f"http://localhost:3000/api/pc/{category_id}/parts").json()
     for part in parts:
         if part["ticket"] == Ticket:
             return
-    session.post(
+    response = session.post(
         f"http://localhost:3000/api/pc/{category_id}/parts",
-        json={
-            "name": Name,
-            "epic": Epic,
-            "ticket": Ticket,
-            "quantity": Quantity,
+        files={
+            "data": (
+                None,
+                json.dumps(
+                    {
+                        "name": Name,
+                        "epic": Epic,
+                        "ticket": Ticket,
+                        "quantity": Quantity,
+                    }
+                ),
+                "application/json",
+            ),
+            "file": (attachment.filename, attachment.get(), "application/octet-stream"),
         },
     )
+    if response.ok:
+        try:
+            print(response.json())
+        except requests.exceptions.JSONDecodeError:
+            print(f"Part created successfully, but response was not JSON: {response.text}")
+    else:
+        print(f"Failed to create part. Status: {response.status_code}, Response: {response.text}")
 
 
 def cleanUpOldParts(issue_keys: set[str]):
@@ -95,22 +97,6 @@ def cleanUpOldParts(issue_keys: set[str]):
                 session.delete(f"http://localhost:3000/api/parts/{part['id']}")
         if len(parts) == 0:
             session.delete(f"http://localhost:3000/api/pc/{pc['id']}")
-
-    s3 = boto3.resource("s3")
-    bucket = s3.Bucket("autocam-attachments")
-    for obj in bucket.objects.all():
-        key = obj.key
-        if not key.startswith("Valor-"):
-            continue
-
-        rest = key[len("Valor-") :]
-        if "-" not in rest:
-            continue
-        part_name, _filename = rest.rsplit("-", 1)
-
-        for part in deleted_parts:
-            if part["name"] == part_name:
-                obj.delete()
 
 
 ### Main Function
@@ -128,7 +114,8 @@ def processJiraIssues():
         Ticket = issue.key
         Material = str(issue.get_field("customfield_10202"))
         Thickness = float(str(issue.get_field("customfield_10207")))
-
+        attachments = issue.get_field("attachment")
+        attachments = [att for att in attachments if att.filename.endswith(".step")]
         if (
             not Material
             or not Thickness
@@ -140,12 +127,11 @@ def processJiraIssues():
             or Name == ""
             or Epic == ""
             or Quantity == 0
+            or len(attachments) == 0
         ):
             continue
-
-        handleS3withIssue(issue, Name)
         category_id = handlePostgresPartCategories(Material, Thickness)
-        handlePostgresParts(Name, Epic, Ticket, Quantity, category_id)
+        handlePostgresParts(Name, Epic, Ticket, Quantity, category_id, attachments[0])
         processed += 1
 
     print(f"Finished processing issues. {processed} processed.")
