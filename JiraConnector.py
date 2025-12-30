@@ -39,15 +39,12 @@ def getJiraIssues():
 
 
 def handlePostgresPartCategories(Material, Thickness):
-    response = session.get("http://localhost:3000/api/pc")
-    part_categories = response.json()
-    for pc in part_categories:
-        if pc["material"] == Material and pc["thickness"] == Thickness:
-            return pc["id"]
-    response = session.post(
-        "http://localhost:3000/api/pc",
-        json={"material": Material, "thickness": Thickness},
-    )
+    part_category = { "material": Material, "thickness": Thickness }
+    response = session.get("http://localhost:3000/api/pc", params=part_category)
+    pc = response.json()
+    if len(pc):
+        return pc[0]["id"]
+    response = session.post("http://localhost:3000/api/pc", json=part_category)
     category_id = response.json().get("id")
     return category_id
 
